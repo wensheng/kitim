@@ -958,6 +958,7 @@ fn spawn_render_thread(
         let mut active_generation = playback_generation.load(Ordering::SeqCst);
         let mut first_video_pts_ms: Option<u64> = None;
         let mut last_frame_time = Instant::now();
+        let mut tmux_image_state = kitty::TmuxImageState::new();
 
         let _ = queue!(stdout, Clear(ClearType::All), MoveTo(0, 0));
         let _ = draw_status_row(&mut stdout, layout, &status);
@@ -1025,7 +1026,7 @@ fn spawn_render_thread(
 
                     let (origin_col, origin_row) = layout.origin_for(display_size);
                     let _ = queue!(stdout, MoveTo(origin_col, origin_row));
-                    let _ = kitty::write_rgba_frame_to(
+                    let _ = kitty::write_rgba_frame_to_with_tmux_state(
                         &mut stdout,
                         &rgba,
                         display_size.target_w_px,
@@ -1033,6 +1034,8 @@ fn spawn_render_thread(
                         display_size.target_cols,
                         display_size.target_rows,
                         true,
+                        origin_col,
+                        Some(&mut tmux_image_state),
                     );
                     let _ = draw_status_row(&mut stdout, layout, &status);
                 }

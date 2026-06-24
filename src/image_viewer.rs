@@ -80,6 +80,7 @@ pub fn view(config: &Config, file_path: &str) -> Result<(), Box<dyn std::error::
         }
         kitty::move_up_robust(target_rows as u16)?;
 
+        let mut tmux_image_state = kitty::TmuxImageState::new();
         'outer: loop {
             for frame in &frames {
                 let buffer: &image::RgbaImage = frame.buffer();
@@ -92,13 +93,14 @@ pub fn view(config: &Config, file_path: &str) -> Result<(), Box<dyn std::error::
                 let rgba = resized.to_rgba8();
 
                 // Draw using the Kitty protocol with prevent_cursor_move = true
-                kitty::write_rgba_frame(
+                kitty::write_rgba_frame_with_tmux_state(
                     &rgba,
                     target_w_px,
                     target_h_px,
                     target_cols,
                     target_rows,
                     true,
+                    &mut tmux_image_state,
                 )?;
 
                 let delay = match config.fps {

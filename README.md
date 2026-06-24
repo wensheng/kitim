@@ -17,7 +17,7 @@
 [**Warp**](https://warp.dev/),
 [**iTerm2**](https://www.iterm2.com/) (see notes below for iTerm2).***
 
-[![demo]](https://github.com/user-attachments/assets/d21faeb7-aead-41c1-b270-0f366005a2d6)
+[![demo]](https://github.com/user-attachments/assets/acd301e1-b749-446a-ab40-67845a13a6bb)
 
 ## Install
 

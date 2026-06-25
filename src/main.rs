@@ -4,6 +4,7 @@ mod ffmpeg;
 mod image_viewer;
 mod kitty;
 mod playback_control;
+mod terminal_geometry;
 mod video_player;
 
 use clap::Parser;

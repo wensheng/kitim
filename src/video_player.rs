@@ -2,13 +2,14 @@ use crate::config::Config;
 use crate::ffmpeg::*;
 use crate::kitty;
 use crate::playback_control;
+use crate::terminal_geometry::{cells_for_pixels, TerminalGeometry};
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute, queue,
     style::Print,
     terminal::{
-        self, disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen,
+        disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen,
         LeaveAlternateScreen,
     },
 };
@@ -25,8 +26,6 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ringbuf::traits::{Consumer, Producer, Split};
 use ringbuf::HeapRb;
 
-const CELL_WIDTH_PX: u32 = 10;
-const CELL_HEIGHT_PX: u32 = 20;
 const FIT_MARGIN_COLS: u16 = 4;
 const FIT_MARGIN_ROWS: u16 = 2;
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -55,7 +54,7 @@ enum PlayerCommand {
     SeekBy(i64),
     SeekTo(u64),
     VolumeBy(i32),
-    Resize(u16, u16),
+    Resize(TerminalGeometry),
     Quit,
 }
 
@@ -71,25 +70,28 @@ struct VideoDisplaySize {
 struct VideoTerminalLayout {
     cols: u16,
     rows: u16,
+    cell_width_px: u32,
+    cell_height_px: u32,
     video_area_rows: u16,
     status_row: Option<u16>,
 }
 
 impl VideoTerminalLayout {
     fn current() -> Self {
-        let (cols, rows) = terminal::size().unwrap_or((80, 24));
-        Self::from_cells(cols, rows)
+        Self::from_geometry(TerminalGeometry::current())
     }
 
-    fn from_cells(cols: u16, rows: u16) -> Self {
-        let cols = cols.max(1);
-        let rows = rows.max(1);
+    fn from_geometry(geometry: TerminalGeometry) -> Self {
+        let cols = geometry.cols.max(1);
+        let rows = geometry.rows.max(1);
         let status_row = (rows >= 2).then_some(rows - 1);
         let video_area_rows = if status_row.is_some() { rows - 1 } else { rows }.max(1);
 
         Self {
             cols,
             rows,
+            cell_width_px: geometry.cell_width_px,
+            cell_height_px: geometry.cell_height_px,
             video_area_rows,
             status_row,
         }
@@ -187,24 +189,11 @@ impl Drop for VideoTerminalSession {
     }
 }
 
-fn target_cells_for_source_dimension(source_px: c_int, zoom: f32, cell_px: u32) -> u32 {
+fn target_pixels_for_source_dimension(source_px: c_int, zoom: f32) -> u32 {
     let source_px = source_px.max(1) as f32;
     let zoom = if zoom.is_finite() { zoom.max(0.0) } else { 0.0 };
-    let target_px = source_px * zoom;
 
-    std::cmp::max(1, (target_px / cell_px as f32).round() as u32)
-}
-
-fn video_display_size(source_width: c_int, source_height: c_int, zoom: f32) -> VideoDisplaySize {
-    let target_cols = target_cells_for_source_dimension(source_width, zoom, CELL_WIDTH_PX);
-    let target_rows = target_cells_for_source_dimension(source_height, zoom, CELL_HEIGHT_PX);
-
-    VideoDisplaySize {
-        target_cols,
-        target_rows,
-        target_w_px: target_cols * CELL_WIDTH_PX,
-        target_h_px: target_rows * CELL_HEIGHT_PX,
-    }
+    (source_px * zoom).round().max(1.0) as u32
 }
 
 fn fit_video_display_size(
@@ -213,7 +202,8 @@ fn fit_video_display_size(
     zoom: f32,
     layout: VideoTerminalLayout,
 ) -> VideoDisplaySize {
-    let desired = video_display_size(source_width, source_height, zoom);
+    let desired_w_px = target_pixels_for_source_dimension(source_width, zoom);
+    let desired_h_px = target_pixels_for_source_dimension(source_height, zoom);
     let max_cols = u32::from(layout.cols.saturating_sub(FIT_MARGIN_COLS).max(1));
     let max_rows = u32::from(
         layout
@@ -221,21 +211,25 @@ fn fit_video_display_size(
             .saturating_sub(FIT_MARGIN_ROWS)
             .max(1),
     );
-    let scale = (max_cols as f32 / desired.target_cols as f32)
-        .min(max_rows as f32 / desired.target_rows as f32)
+    let max_w_px = max_cols * layout.cell_width_px;
+    let max_h_px = max_rows * layout.cell_height_px;
+    let scale = (max_w_px as f32 / desired_w_px as f32)
+        .min(max_h_px as f32 / desired_h_px as f32)
         .min(1.0);
-    let target_cols = ((desired.target_cols as f32 * scale).round() as u32)
-        .max(1)
-        .min(max_cols);
-    let target_rows = ((desired.target_rows as f32 * scale).round() as u32)
-        .max(1)
-        .min(max_rows);
+    let target_w_px = (desired_w_px as f32 * scale)
+        .round()
+        .max(1.0)
+        .min(max_w_px as f32) as u32;
+    let target_h_px = (desired_h_px as f32 * scale)
+        .round()
+        .max(1.0)
+        .min(max_h_px as f32) as u32;
 
     VideoDisplaySize {
-        target_cols,
-        target_rows,
-        target_w_px: target_cols * CELL_WIDTH_PX,
-        target_h_px: target_rows * CELL_HEIGHT_PX,
+        target_cols: cells_for_pixels(target_w_px, layout.cell_width_px).min(max_cols),
+        target_rows: cells_for_pixels(target_h_px, layout.cell_height_px).min(max_rows),
+        target_w_px,
+        target_h_px,
     }
 }
 
@@ -863,7 +857,8 @@ fn spawn_input_thread(
                         }
                     }
                     Ok(Event::Resize(cols, rows)) => {
-                        let _ = command_sender.send(PlayerCommand::Resize(cols, rows));
+                        let geometry = TerminalGeometry::current_with_reported_cells(cols, rows);
+                        let _ = command_sender.send(PlayerCommand::Resize(geometry));
                     }
                     Ok(_) => {}
                     Err(_) => break,
@@ -1258,8 +1253,8 @@ unsafe fn handle_pending_commands(
                 });
                 let _ = render_sender.try_send(RenderMessage::RedrawStatus);
             }
-            PlayerCommand::Resize(cols, rows) => {
-                let layout = VideoTerminalLayout::from_cells(cols, rows);
+            PlayerCommand::Resize(geometry) => {
+                let layout = VideoTerminalLayout::from_geometry(geometry);
                 let display_size =
                     fit_video_display_size(source_width, source_height, zoom, layout);
                 playback.terminal_layout = layout;
@@ -1413,9 +1408,15 @@ fn update_status(status: &SharedStatus, update: impl FnOnce(&mut StatusState)) {
 mod tests {
     use super::*;
 
+    fn layout_from_cells(cols: u16, rows: u16) -> VideoTerminalLayout {
+        VideoTerminalLayout::from_geometry(TerminalGeometry::from_cells(cols, rows))
+    }
+
     #[test]
     fn default_video_zoom_uses_original_source_size() {
-        let size = video_display_size(1280, 720, 1.0);
+        let layout =
+            VideoTerminalLayout::from_geometry(TerminalGeometry::with_cell_size(200, 80, 10, 20));
+        let size = fit_video_display_size(1280, 720, 1.0, layout);
 
         assert_eq!(size.target_w_px, 1280);
         assert_eq!(size.target_h_px, 720);
@@ -1425,7 +1426,9 @@ mod tests {
 
     #[test]
     fn video_zoom_is_relative_to_original_source_size() {
-        let size = video_display_size(1280, 720, 1.5);
+        let layout =
+            VideoTerminalLayout::from_geometry(TerminalGeometry::with_cell_size(240, 80, 10, 20));
+        let size = fit_video_display_size(1280, 720, 1.5, layout);
 
         assert_eq!(size.target_w_px, 1920);
         assert_eq!(size.target_h_px, 1080);
@@ -1435,7 +1438,7 @@ mod tests {
 
     #[test]
     fn video_layout_centers_when_space_allows() {
-        let layout = VideoTerminalLayout::from_cells(100, 30);
+        let layout = layout_from_cells(100, 30);
         let size = fit_video_display_size(1280, 720, 1.0, layout);
 
         assert_eq!(size.target_cols, 96);
@@ -1446,7 +1449,7 @@ mod tests {
 
     #[test]
     fn video_layout_clamps_to_available_video_area() {
-        let layout = VideoTerminalLayout::from_cells(40, 10);
+        let layout = layout_from_cells(40, 10);
         let size = fit_video_display_size(1280, 720, 1.0, layout);
 
         assert_eq!(size.target_cols, 25);
@@ -1456,7 +1459,7 @@ mod tests {
 
     #[test]
     fn video_layout_handles_tiny_terminals() {
-        let layout = VideoTerminalLayout::from_cells(10, 1);
+        let layout = layout_from_cells(10, 1);
         let size = fit_video_display_size(1280, 720, 1.0, layout);
 
         assert_eq!(layout.status_row, None);
@@ -1464,6 +1467,18 @@ mod tests {
         assert_eq!(size.target_rows, 1);
         assert_eq!(size.target_cols, 4);
         assert_eq!(layout.origin_for(size).1, 0);
+    }
+
+    #[test]
+    fn video_uses_reported_cell_geometry_for_occupied_cells() {
+        let layout =
+            VideoTerminalLayout::from_geometry(TerminalGeometry::with_cell_size(120, 40, 12, 20));
+        let size = fit_video_display_size(640, 360, 1.0, layout);
+
+        assert_eq!(size.target_w_px, 640);
+        assert_eq!(size.target_h_px, 360);
+        assert_eq!(size.target_cols, 54);
+        assert_eq!(size.target_rows, 18);
     }
 
     #[test]

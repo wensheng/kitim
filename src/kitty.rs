@@ -524,7 +524,7 @@ pub fn move_up_robust(rows: u16) -> io::Result<()> {
 /// Write a 32-bit RGBA image to stdout using the Kitty graphics protocol.
 /// `pixels` is the raw RGBA pixel buffer.
 /// `width_px` and `height_px` are the image dimensions in pixels.
-/// `cols` and `rows` are the target dimensions in terminal cells.
+/// `cols` and `rows` are the occupied terminal cells, used for tmux placeholders.
 /// `prevent_cursor_move` instructs the terminal whether to keep the cursor fixed (C=1).
 pub fn write_rgba_frame(
     pixels: &[u8],
@@ -645,8 +645,8 @@ pub fn write_rgba_frame_to_with_tmux_state<W: Write>(
             } else {
                 write!(
                     packet,
-                    "\x1b_Ga=T,f=32,s={},v={},c={},r={}{},q=2,m={};",
-                    width_px, height_px, cols, rows, c_policy, m_param
+                    "\x1b_Ga=T,f=32,s={},v={}{},q=2,m={};",
+                    width_px, height_px, c_policy, m_param
                 )?;
             }
         } else {
@@ -706,5 +706,20 @@ mod tests {
     fn tmux_placeholder_cells_are_capped_to_available_diacritics() {
         assert_eq!(tmux_placeholder_cells(999, 999), (297, 297));
         assert_eq!(tmux_placeholder_cells(0, 0), (1, 1));
+    }
+
+    #[test]
+    fn direct_kitty_packet_uses_pixel_size_without_cell_placement() {
+        if std::env::var_os("TMUX").is_some() {
+            return;
+        }
+
+        let mut out = Vec::new();
+        write_rgba_frame_to(&mut out, &[0, 0, 0, 255], 1, 1, 1, 1, false).unwrap();
+        let packet = String::from_utf8(out).unwrap();
+
+        assert!(packet.starts_with("\x1b_Ga=T,f=32,s=1,v=1,q=2,m=0;"));
+        assert!(!packet.contains(",c="));
+        assert!(!packet.contains(",r="));
     }
 }

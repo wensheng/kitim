@@ -1,6 +1,6 @@
 [package]
 name = "kitim"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 description = "A terminal-based image viewer, audio and video player using the Kitty graphics protocol"
 license = "MIT"
@@ -17,3 +17,4 @@ ctrlc = "3.5"
 base64 = "0.22"
 cpal = "0.17"
 ringbuf = "0.5"
+libc = "0.2"

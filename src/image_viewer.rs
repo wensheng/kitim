@@ -1,11 +1,10 @@
 use crate::config::Config;
 use crate::kitty;
+use crate::terminal_geometry::{cells_for_pixels, TerminalGeometry};
 use image::{AnimationDecoder, GenericImageView};
 use std::fs::File;
 use std::time::Duration;
 
-const CELL_WIDTH_PX: u32 = 10;
-const CELL_HEIGHT_PX: u32 = 20;
 const FIT_MARGIN_COLS: u16 = 4;
 const FIT_MARGIN_ROWS: u16 = 2;
 
@@ -21,46 +20,44 @@ fn image_display_size(
     image_width: u32,
     image_height: u32,
     zoom: f32,
-    term_cols: u16,
-    term_rows: u16,
+    geometry: TerminalGeometry,
 ) -> ImageDisplaySize {
     let zoom = if zoom.is_finite() { zoom.max(0.0) } else { 0.0 };
-    let desired_cols = ((image_width as f32 * zoom) / CELL_WIDTH_PX as f32)
-        .round()
-        .max(1.0) as u32;
-    let desired_rows = ((image_height as f32 * zoom) / CELL_HEIGHT_PX as f32)
-        .round()
-        .max(1.0) as u32;
-    let max_cols = u32::from(term_cols.saturating_sub(FIT_MARGIN_COLS).max(1));
-    let max_rows = u32::from(term_rows.saturating_sub(FIT_MARGIN_ROWS).max(1));
-    let scale = (max_cols as f32 / desired_cols as f32)
-        .min(max_rows as f32 / desired_rows as f32)
+    let desired_w_px = (image_width as f32 * zoom).round().max(1.0) as u32;
+    let desired_h_px = (image_height as f32 * zoom).round().max(1.0) as u32;
+    let max_w_px = geometry.drawable_width_px(FIT_MARGIN_COLS);
+    let max_h_px = geometry.drawable_height_px(FIT_MARGIN_ROWS);
+    let scale = (max_w_px as f32 / desired_w_px as f32)
+        .min(max_h_px as f32 / desired_h_px as f32)
         .min(1.0);
-    let target_cols = ((desired_cols as f32 * scale).round() as u32)
-        .max(1)
-        .min(max_cols);
-    let target_rows = ((desired_rows as f32 * scale).round() as u32)
-        .max(1)
-        .min(max_rows);
+    let target_w_px = (desired_w_px as f32 * scale)
+        .round()
+        .max(1.0)
+        .min(max_w_px as f32) as u32;
+    let target_h_px = (desired_h_px as f32 * scale)
+        .round()
+        .max(1.0)
+        .min(max_h_px as f32) as u32;
 
     ImageDisplaySize {
-        target_cols,
-        target_rows,
-        target_w_px: target_cols * CELL_WIDTH_PX,
-        target_h_px: target_rows * CELL_HEIGHT_PX,
+        target_cols: cells_for_pixels(target_w_px, geometry.cell_width_px),
+        target_rows: cells_for_pixels(target_h_px, geometry.cell_height_px),
+        target_w_px,
+        target_h_px,
     }
 }
 
 pub fn view(config: &Config, file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    // Query terminal dimensions (columns, rows)
-    let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    // Query terminal cells and pixel geometry. The Kitty graphics protocol uses
+    // real pixels, so cell dimensions must not be guessed.
+    let terminal_geometry = TerminalGeometry::current();
 
     // Load static image first (to determine dimensions/format)
     let img = image::open(file_path)?;
     let (img_w, img_h) = img.dimensions();
 
     // Calculate display dimensions in cells at original size, shrinking only to fit.
-    let display_size = image_display_size(img_w, img_h, config.zoom, term_cols, term_rows);
+    let display_size = image_display_size(img_w, img_h, config.zoom, terminal_geometry);
     let target_cols = display_size.target_cols;
     let target_rows = display_size.target_rows;
     let target_w_px = display_size.target_w_px;
@@ -155,7 +152,8 @@ mod tests {
 
     #[test]
     fn default_image_zoom_uses_original_size() {
-        let size = image_display_size(640, 360, 1.0, 120, 40);
+        let geometry = TerminalGeometry::from_cells(120, 40);
+        let size = image_display_size(640, 360, 1.0, geometry);
 
         assert_eq!(size.target_w_px, 640);
         assert_eq!(size.target_h_px, 360);
@@ -165,11 +163,23 @@ mod tests {
 
     #[test]
     fn large_image_shrinks_to_fit_with_margin() {
-        let size = image_display_size(1280, 720, 1.0, 80, 24);
+        let geometry = TerminalGeometry::from_cells(80, 24);
+        let size = image_display_size(1280, 720, 1.0, geometry);
 
         assert_eq!(size.target_cols, 76);
-        assert_eq!(size.target_rows, 21);
+        assert_eq!(size.target_rows, 22);
         assert_eq!(size.target_w_px, 760);
-        assert_eq!(size.target_h_px, 420);
+        assert_eq!(size.target_h_px, 428);
+    }
+
+    #[test]
+    fn non_default_cell_geometry_preserves_pixel_size() {
+        let geometry = TerminalGeometry::with_cell_size(120, 40, 12, 20);
+        let size = image_display_size(640, 360, 1.0, geometry);
+
+        assert_eq!(size.target_w_px, 640);
+        assert_eq!(size.target_h_px, 360);
+        assert_eq!(size.target_cols, 54);
+        assert_eq!(size.target_rows, 18);
     }
 }

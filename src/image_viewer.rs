@@ -48,12 +48,12 @@ fn image_display_size(
 }
 
 pub fn view(config: &Config, file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // Load static image first (to determine dimensions/format)
+    let img = image::open(file_path)?;
+    kitty::ensure_graphics_support()?;
     // Query terminal cells and pixel geometry. The Kitty graphics protocol uses
     // real pixels, so cell dimensions must not be guessed.
     let terminal_geometry = TerminalGeometry::current();
-
-    // Load static image first (to determine dimensions/format)
-    let img = image::open(file_path)?;
     let (img_w, img_h) = img.dimensions();
 
     // Calculate display dimensions in cells at original size, shrinking only to fit.

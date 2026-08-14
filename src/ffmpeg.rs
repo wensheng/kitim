@@ -42,10 +42,10 @@ pub struct AVCodecParameters {
     pub codec_type: c_int,
     pub codec_id: u32,
     pub codec_tag: u32,
-    pub _pad1: u32,                  // Padding for 8-byte pointer alignment
+    pub _pad1: u32, // Padding for 8-byte pointer alignment
     pub extradata: *mut u8,
     pub extradata_size: c_int,
-    pub _pad2: u32,                  // Padding for 8-byte pointer alignment
+    pub _pad2: u32, // Padding for 8-byte pointer alignment
     pub coded_side_data: *mut c_void,
     pub nb_coded_side_data: c_int,
     pub format: c_int,
@@ -89,8 +89,8 @@ pub struct AVCodecParameters {
     pub chroma_location: c_int,
     pub video_delay: c_int,
     // implicit 4-byte pad here for 8-byte u64 alignment
-    pub channel_layout: u64,         // deprecated, FF_API_OLD_CHANNEL_LAYOUT
-    pub channels: c_int,             // deprecated, FF_API_OLD_CHANNEL_LAYOUT
+    pub channel_layout: u64, // deprecated, FF_API_OLD_CHANNEL_LAYOUT
+    pub channels: c_int,     // deprecated, FF_API_OLD_CHANNEL_LAYOUT
     pub sample_rate: c_int,
     pub block_align: c_int,
     pub frame_size: c_int,
@@ -254,10 +254,7 @@ extern "C" {
         options: *mut *mut c_void,
     ) -> c_int;
 
-    pub fn avformat_find_stream_info(
-        ic: *mut AVFormatContext,
-        options: *mut *mut c_void,
-    ) -> c_int;
+    pub fn avformat_find_stream_info(ic: *mut AVFormatContext, options: *mut *mut c_void) -> c_int;
 
     pub fn avformat_close_input(ps: *mut *mut AVFormatContext);
 
@@ -286,14 +283,8 @@ extern "C" {
 
     // Decoding
     pub fn av_read_frame(s: *mut AVFormatContext, pkt: *mut AVPacket) -> c_int;
-    pub fn avcodec_send_packet(
-        avctx: *mut AVCodecContext,
-        avpkt: *const AVPacket,
-    ) -> c_int;
-    pub fn avcodec_receive_frame(
-        avctx: *mut AVCodecContext,
-        frame: *mut AVFrame,
-    ) -> c_int;
+    pub fn avcodec_send_packet(avctx: *mut AVCodecContext, avpkt: *const AVPacket) -> c_int;
+    pub fn avcodec_receive_frame(avctx: *mut AVCodecContext, frame: *mut AVFrame) -> c_int;
     pub fn avcodec_flush_buffers(avctx: *mut AVCodecContext);
 
     // Seeking

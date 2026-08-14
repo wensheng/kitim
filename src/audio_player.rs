@@ -245,6 +245,7 @@ pub fn play(config: &Config, file_path: &str) -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 unsafe fn receive_and_queue_audio<P: Producer<Item = f32>>(
     audio_codec_ctx: *mut AVCodecContext,
     audio_frame: *mut AVFrame,

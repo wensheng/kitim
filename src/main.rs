@@ -23,18 +23,26 @@ fn main() {
             .to_lowercase();
 
         // Common video formats
-        let is_video_ext = match ext.as_str() {
-            "mp4" | "mkv" | "avi" | "mov" | "webm" | "flv" | "wmv" | "m4v" | "mpg" | "mpeg"
-            | "3gp" => true,
-            _ => false,
-        };
+        let is_video_ext = matches!(
+            ext.as_str(),
+            "mp4" | "mkv" | "avi" | "mov" | "webm" | "flv" | "wmv" | "m4v" | "mpg" | "mpeg" | "3gp"
+        );
 
         // Common audio formats
-        let is_audio_ext = match ext.as_str() {
-            "mp3" | "m4a" | "aac" | "wav" | "flac" | "ogg" | "opus" | "wma" | "alac" | "aiff"
-            | "aif" => true,
-            _ => false,
-        };
+        let is_audio_ext = matches!(
+            ext.as_str(),
+            "mp3"
+                | "m4a"
+                | "aac"
+                | "wav"
+                | "flac"
+                | "ogg"
+                | "opus"
+                | "wma"
+                | "alac"
+                | "aiff"
+                | "aif"
+        );
 
         let result = if is_video_ext {
             video_player::play(&config, file)
@@ -44,12 +52,12 @@ fn main() {
             // Try as image, then fall back through FFmpeg-backed video and audio decoders.
             match image_viewer::view(&config, file) {
                 Ok(_) => Ok(()),
-                Err(_) => {
-                    match video_player::play(&config, file) {
-                        Ok(_) => Ok(()),
-                        Err(_) => audio_player::play(&config, file),
-                    }
-                }
+                Err(error) if kitty::is_graphics_support_error(error.as_ref()) => Err(error),
+                Err(_) => match video_player::play(&config, file) {
+                    Ok(_) => Ok(()),
+                    Err(error) if kitty::is_graphics_support_error(error.as_ref()) => Err(error),
+                    Err(_) => audio_player::play(&config, file),
+                },
             }
         };
 

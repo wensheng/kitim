@@ -1,12 +1,14 @@
 use base64::{prelude::BASE64_STANDARD, Engine};
 use std::io::{self, Write};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicU32, Ordering},
-    Once,
+    Once, OnceLock,
 };
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const KITTY_CHUNK_SIZE: usize = 4096;
 const TMUX_PASSTHROUGH_PREFIX: &[u8] = b"\x1bPtmux;";
@@ -313,9 +315,27 @@ const DIACRITICS: [char; 297] = [
 ];
 
 static TMUX_PASSTHROUGH_INIT: Once = Once::new();
-static NEXT_IMAGE_ID: AtomicU32 = AtomicU32::new(1);
+static NEXT_IMAGE_ID: OnceLock<AtomicU32> = OnceLock::new();
 
-/// Reusable image IDs for tmux video/GIF output. Reusing two IDs bounds terminal
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputMode {
+    Direct,
+    Tmux,
+    Vvmux,
+}
+
+#[derive(Debug)]
+pub struct GraphicsSupportError;
+
+impl std::fmt::Display for GraphicsSupportError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Kitty graphics are unavailable in this vvmux attachment")
+    }
+}
+
+impl std::error::Error for GraphicsSupportError {}
+
+/// Reusable image IDs for multiplexer video/GIF output. Reusing two IDs bounds terminal
 /// image storage while keeping the previously visible frame alive until replaced.
 #[derive(Debug, Clone)]
 pub struct TmuxImageState {
@@ -385,22 +405,35 @@ pub fn flush_robust<W: Write>(mut writer: W) -> io::Result<()> {
 }
 
 fn next_image_id() -> u32 {
-    let id = NEXT_IMAGE_ID.fetch_add(1, Ordering::Relaxed) & 0x00ff_ffff;
-    if id == 0 {
-        next_image_id()
-    } else {
-        id
+    let sequence = NEXT_IMAGE_ID.get_or_init(|| {
+        let mut seed = [0_u8; 4];
+        if getrandom::fill(&mut seed).is_err() {
+            seed = std::process::id().to_ne_bytes();
+        }
+        let seed = u32::from_ne_bytes(seed).max(1);
+        AtomicU32::new(seed)
+    });
+    loop {
+        let id = sequence.fetch_add(1, Ordering::Relaxed);
+        if id != 0 {
+            return id;
+        }
     }
 }
 
-fn tmux_passthrough_needed() -> bool {
-    let Some(tmux_env) = std::env::var_os("TMUX") else {
-        return false;
-    };
-    if tmux_env.as_os_str().is_empty() {
-        return false;
+fn output_mode() -> OutputMode {
+    if std::env::var_os("TMUX").is_some_and(|value| !value.is_empty()) {
+        return OutputMode::Tmux;
     }
+    if std::env::var_os("VVMUX_PANE_ID").is_some_and(|value| !value.is_empty())
+        && std::env::var("TERM_PROGRAM").as_deref() == Ok("vvmux")
+    {
+        return OutputMode::Vvmux;
+    }
+    OutputMode::Direct
+}
 
+fn enable_tmux_passthrough() {
     TMUX_PASSTHROUGH_INIT.call_once(|| {
         let _ = Command::new("tmux")
             .args(["set", "-p", "allow-passthrough", "on"])
@@ -409,8 +442,101 @@ fn tmux_passthrough_needed() -> bool {
             .stderr(Stdio::null())
             .status();
     });
+}
 
-    true
+pub fn is_graphics_support_error(error: &(dyn std::error::Error + 'static)) -> bool {
+    error.downcast_ref::<GraphicsSupportError>().is_some()
+}
+
+pub fn ensure_graphics_support() -> Result<(), GraphicsSupportError> {
+    if output_mode() != OutputMode::Vvmux {
+        return Ok(());
+    }
+    query_vvmux_graphics()
+        .then_some(())
+        .ok_or(GraphicsSupportError)
+}
+
+#[cfg(unix)]
+fn query_vvmux_graphics() -> bool {
+    use std::fs::OpenOptions;
+
+    struct TermiosGuard {
+        fd: std::os::fd::RawFd,
+        original: libc::termios,
+    }
+    impl Drop for TermiosGuard {
+        fn drop(&mut self) {
+            unsafe {
+                libc::tcsetattr(self.fd, libc::TCSANOW, &self.original);
+            }
+        }
+    }
+
+    let Ok(mut tty) = OpenOptions::new().read(true).write(true).open("/dev/tty") else {
+        return false;
+    };
+    let fd = tty.as_raw_fd();
+    let mut original = std::mem::MaybeUninit::<libc::termios>::uninit();
+    if unsafe { libc::tcgetattr(fd, original.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    let original = unsafe { original.assume_init() };
+    let mut raw = original;
+    raw.c_lflag &= !(libc::ICANON | libc::ECHO);
+    raw.c_cc[libc::VMIN] = 0;
+    raw.c_cc[libc::VTIME] = 0;
+    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
+        return false;
+    }
+    let _guard = TermiosGuard { fd, original };
+
+    let image_id = next_image_id();
+    let query = format!("\x1b_Ga=q,t=d,f=24,s=1,v=1,i={image_id},q=2;AAAA\x1b\\\x1b[c");
+    if write_all_robust(&mut tty, query.as_bytes()).is_err() || flush_robust(&mut tty).is_err() {
+        return false;
+    }
+
+    let deadline = Instant::now() + Duration::from_millis(750);
+    let mut response = Vec::new();
+    while Instant::now() < deadline && response.len() < 4096 {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let timeout = remaining.as_millis().min(100) as libc::c_int;
+        let mut pollfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        if unsafe { libc::poll(&mut pollfd, 1, timeout) } <= 0 {
+            continue;
+        }
+        let mut buffer = [0_u8; 256];
+        match std::io::Read::read(&mut tty, &mut buffer) {
+            Ok(0) => continue,
+            Ok(count) => response.extend_from_slice(&buffer[..count]),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(_) => return false,
+        }
+        if kitty_query_result(&response, image_id).is_some() {
+            break;
+        }
+    }
+    kitty_query_result(&response, image_id) == Some(true)
+}
+
+#[cfg(not(unix))]
+fn query_vvmux_graphics() -> bool {
+    false
+}
+
+fn kitty_query_result(response: &[u8], image_id: u32) -> Option<bool> {
+    let prefix = format!("\x1b_Gi={image_id};");
+    let start = response
+        .windows(prefix.len())
+        .position(|window| window == prefix.as_bytes())?;
+    let body = &response[start + prefix.len()..];
+    let end = body.windows(2).position(|window| window == b"\x1b\\")?;
+    Some(&body[..end] == b"OK")
 }
 
 fn tmux_placeholder_cells(cols: u32, rows: u32) -> (u32, u32) {
@@ -443,10 +569,14 @@ fn write_kitty_packet<W: Write>(
     write_all_robust(writer, &wrapped)
 }
 
-fn write_tmux_delete_image<W: Write>(writer: &mut W, image_id: u32) -> io::Result<()> {
+fn write_delete_image<W: Write>(
+    writer: &mut W,
+    image_id: u32,
+    tmux_passthrough: bool,
+) -> io::Result<()> {
     let mut packet = Vec::new();
     write!(packet, "\x1b_Ga=d,d=I,i={},q=2\x1b\\", image_id)?;
-    write_kitty_packet(writer, &packet, true)
+    write_kitty_packet(writer, &packet, tmux_passthrough)
 }
 
 fn append_diacritic(buf: &mut Vec<u8>, value: u32) {
@@ -463,6 +593,7 @@ fn append_tmux_placeholders(
     rows: u32,
     indent_cols: u16,
     restore_cursor: bool,
+    encode_image_high_byte: bool,
 ) -> io::Result<()> {
     let (cols, rows) = tmux_placeholder_cells(cols, rows);
     if restore_cursor {
@@ -487,6 +618,9 @@ fn append_tmux_placeholders(
             buf.extend_from_slice(KITTY_PLACEHOLDER.encode_utf8(&mut encoded).as_bytes());
             append_diacritic(buf, row);
             append_diacritic(buf, col);
+            if encode_image_high_byte {
+                append_diacritic(buf, (image_id >> 24) & 0xff);
+            }
         }
         if row + 1 < rows {
             buf.extend_from_slice(b"\x1b[39m\n\r");
@@ -591,6 +725,7 @@ pub fn write_rgba_frame_to<W: Write>(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn write_rgba_frame_to_with_tmux_state<W: Write>(
     writer: &mut W,
     pixels: &[u8],
@@ -602,18 +737,52 @@ pub fn write_rgba_frame_to_with_tmux_state<W: Write>(
     placeholder_indent_cols: u16,
     tmux_image_state: Option<&mut TmuxImageState>,
 ) -> io::Result<()> {
-    let tmux_passthrough = tmux_passthrough_needed();
-    let (image_id, delete_before_transmit) = if tmux_passthrough {
+    write_rgba_frame_to_with_mode(
+        writer,
+        pixels,
+        width_px,
+        height_px,
+        cols,
+        rows,
+        prevent_cursor_move,
+        placeholder_indent_cols,
+        tmux_image_state,
+        output_mode(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_rgba_frame_to_with_mode<W: Write>(
+    writer: &mut W,
+    pixels: &[u8],
+    width_px: u32,
+    height_px: u32,
+    cols: u32,
+    rows: u32,
+    prevent_cursor_move: bool,
+    placeholder_indent_cols: u16,
+    tmux_image_state: Option<&mut TmuxImageState>,
+    mode: OutputMode,
+) -> io::Result<()> {
+    let tmux_passthrough = mode == OutputMode::Tmux;
+    if tmux_passthrough {
+        enable_tmux_passthrough();
+    }
+    let multiplexed = mode != OutputMode::Direct;
+    let (mut image_id, delete_before_transmit) = if multiplexed {
         tmux_image_state
             .map(TmuxImageState::next_frame_id)
             .unwrap_or_else(|| (next_image_id(), false))
     } else {
         (0, false)
     };
+    if mode == OutputMode::Tmux {
+        image_id = (image_id & 0x00ff_ffff).max(1);
+    }
     let (placeholder_cols, placeholder_rows) = tmux_placeholder_cells(cols, rows);
 
     if delete_before_transmit {
-        write_tmux_delete_image(writer, image_id)?;
+        write_delete_image(writer, image_id, tmux_passthrough)?;
     }
 
     let base64_str = BASE64_STANDARD.encode(pixels);
@@ -630,7 +799,7 @@ pub fn write_rgba_frame_to_with_tmux_state<W: Write>(
             // First chunk: specify action (a=T), format (f=32 for RGBA), dimensions, quiet mode (q=2)
             // and optional cursor movement policy (C=1 to prevent cursor movement)
             let c_policy = if prevent_cursor_move { ",C=1" } else { "" };
-            if tmux_passthrough {
+            if multiplexed {
                 write!(
                     packet,
                     "\x1b_Ga=T,i={},f=32,s={},v={},c={},r={},U=1{},q=2,m={};",
@@ -661,7 +830,7 @@ pub fn write_rgba_frame_to_with_tmux_state<W: Write>(
         offset += KITTY_CHUNK_SIZE;
     }
 
-    if tmux_passthrough {
+    if multiplexed {
         let mut placeholders = Vec::new();
         append_tmux_placeholders(
             &mut placeholders,
@@ -670,6 +839,7 @@ pub fn write_rgba_frame_to_with_tmux_state<W: Write>(
             rows,
             placeholder_indent_cols,
             prevent_cursor_move,
+            mode == OutputMode::Vvmux,
         )?;
         write_all_robust(&mut *writer, &placeholders)?;
     }
@@ -693,7 +863,7 @@ mod tests {
     #[test]
     fn tmux_placeholders_encode_image_id_and_cell_coordinates() {
         let mut placeholders = Vec::new();
-        append_tmux_placeholders(&mut placeholders, 0x00010203, 2, 2, 3, true).unwrap();
+        append_tmux_placeholders(&mut placeholders, 0x00010203, 2, 2, 3, true, false).unwrap();
         let placeholders = String::from_utf8(placeholders).unwrap();
 
         assert!(placeholders.starts_with("\x1b7\r\x1b[38:2:1:2:3m\x1b[3C"));
@@ -710,16 +880,106 @@ mod tests {
 
     #[test]
     fn direct_kitty_packet_uses_pixel_size_without_cell_placement() {
-        if std::env::var_os("TMUX").is_some() {
-            return;
-        }
-
         let mut out = Vec::new();
-        write_rgba_frame_to(&mut out, &[0, 0, 0, 255], 1, 1, 1, 1, false).unwrap();
+        write_rgba_frame_to_with_mode(
+            &mut out,
+            &[0, 0, 0, 255],
+            1,
+            1,
+            1,
+            1,
+            false,
+            0,
+            None,
+            OutputMode::Direct,
+        )
+        .unwrap();
         let packet = String::from_utf8(out).unwrap();
 
         assert!(packet.starts_with("\x1b_Ga=T,f=32,s=1,v=1,q=2,m=0;"));
         assert!(!packet.contains(",c="));
         assert!(!packet.contains(",r="));
+    }
+
+    #[test]
+    fn tmux_mode_keeps_dcs_passthrough_and_24_bit_placeholders() {
+        let mut state = TmuxImageState {
+            ids: [0x0401_0203, 0x0506_0708],
+            used: [false; 2],
+            next: 0,
+        };
+        let mut out = Vec::new();
+        write_rgba_frame_to_with_mode(
+            &mut out,
+            &[0, 0, 0, 255],
+            1,
+            1,
+            1,
+            1,
+            false,
+            0,
+            Some(&mut state),
+            OutputMode::Tmux,
+        )
+        .unwrap();
+        let output = String::from_utf8(out).unwrap();
+
+        assert!(output.starts_with("\x1bPtmux;\x1b\x1b_Ga=T,i=66051,"));
+        assert!(output.contains("\u{10EEEE}\u{0305}\u{0305}"));
+        assert!(!output.contains("\u{10EEEE}\u{0305}\u{0305}\u{0312}"));
+    }
+
+    #[test]
+    fn vvmux_mode_uses_direct_uploads_and_unicode_placements() {
+        let mut state = TmuxImageState {
+            ids: [0x0401_0203, 0x0506_0708],
+            used: [false; 2],
+            next: 0,
+        };
+        let mut out = Vec::new();
+        write_rgba_frame_to_with_mode(
+            &mut out,
+            &[0, 0, 0, 255],
+            1,
+            1,
+            1,
+            1,
+            false,
+            0,
+            Some(&mut state),
+            OutputMode::Vvmux,
+        )
+        .unwrap();
+        let output = String::from_utf8(out).unwrap();
+
+        assert!(output.starts_with("\x1b_Ga=T,i=67174915,f=32,s=1,v=1,c=1,r=1,U=1,q=2,m=0;"));
+        assert!(!output.contains("\x1bPtmux;"));
+        assert!(output.contains("\u{10EEEE}\u{0305}\u{0305}\u{0312}"));
+    }
+
+    #[test]
+    fn image_ids_are_nonzero_32_bit_values() {
+        let first = next_image_id();
+        let second = next_image_id();
+        assert_ne!(first, 0);
+        assert_ne!(second, 0);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn support_query_matches_only_its_image_id_and_ok_result() {
+        assert_eq!(
+            kitty_query_result(b"noise\x1b_Gi=31;OK\x1b\\tail", 31),
+            Some(true)
+        );
+        assert_eq!(
+            kitty_query_result(b"\x1b_Gi=31;ENOTSUP\x1b\\", 31),
+            Some(false)
+        );
+        assert_eq!(kitty_query_result(b"\x1b_Gi=32;OK\x1b\\", 31), None);
+        let unsupported: Box<dyn std::error::Error> = Box::new(GraphicsSupportError);
+        assert!(is_graphics_support_error(unsupported.as_ref()));
+        let unrelated: Box<dyn std::error::Error> = Box::new(io::Error::other("decoder"));
+        assert!(!is_graphics_support_error(unrelated.as_ref()));
     }
 }

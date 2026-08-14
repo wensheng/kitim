@@ -293,6 +293,10 @@ pub fn play(config: &Config, file_path: &str) -> Result<(), Box<dyn std::error::
             avformat_close_input(&mut format_ctx);
             return Err("Could not find a video stream".into());
         }
+        if let Err(error) = kitty::ensure_graphics_support() {
+            avformat_close_input(&mut format_ctx);
+            return Err(Box::new(error));
+        }
 
         let video_decoder = avcodec_find_decoder((*video_codecpar_ptr).codec_id);
         if video_decoder.is_null() {
@@ -623,7 +627,7 @@ pub fn play(config: &Config, file_path: &str) -> Result<(), Box<dyn std::error::
                                 (*frame).linesize.as_ptr(),
                                 0,
                                 frame_h,
-                                dst_data.as_ptr() as *const *mut u8,
+                                dst_data.as_ptr(),
                                 dst_linesize.as_ptr(),
                             );
 
@@ -934,6 +938,7 @@ fn handle_key(key: KeyEvent, state: &mut ControlInputState) -> KeyOutcome {
     outcome
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_render_thread(
     receiver: Receiver<RenderMessage>,
     running: &'static AtomicBool,
@@ -1172,6 +1177,7 @@ fn parse_timestamp_ms(value: &str) -> Option<u64> {
     Some(seconds * 1000)
 }
 
+#[allow(clippy::too_many_arguments)]
 unsafe fn handle_pending_commands(
     command_receiver: &Receiver<PlayerCommand>,
     running: &AtomicBool,
@@ -1282,6 +1288,7 @@ unsafe fn handle_pending_commands(
     Ok(true)
 }
 
+#[allow(clippy::too_many_arguments)]
 unsafe fn seek_playback_to_ms(
     target_ms: u64,
     playback: &mut PlaybackState,

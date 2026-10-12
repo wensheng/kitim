@@ -32,6 +32,8 @@ const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const STATUS_SHORTCUTS: &str = "f +10s b -10s Left -5s Right +5s Up/Down vol g goto q quit";
 const AVSEEK_FLAG_BACKWARD: c_int = 1;
 const AV_NOPTS_VALUE: i64 = i64::MIN;
+// FFmpeg's platform-independent FFERRTAG('E', 'O', 'F', ' ') value.
+const AVERROR_EOF: c_int = -541_478_725;
 
 #[derive(Debug)]
 enum RenderMessage {
@@ -46,7 +48,33 @@ enum RenderMessage {
         generation: u64,
     },
     RedrawStatus,
+    Drain {
+        generation: u64,
+        complete: mpsc::Sender<()>,
+    },
     Quit,
+}
+
+struct PlaybackDrain {
+    complete: Receiver<()>,
+    rendered: bool,
+}
+
+impl PlaybackDrain {
+    fn is_complete(
+        &mut self,
+        played_samples: u64,
+        queued_samples: u64,
+    ) -> Result<bool, mpsc::TryRecvError> {
+        if !self.rendered {
+            match self.complete.try_recv() {
+                Ok(()) => self.rendered = true,
+                Err(mpsc::TryRecvError::Empty) => return Ok(false),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(played_samples >= queued_samples)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +144,7 @@ struct PlaybackState {
     volume_percent: u32,
     generation: u64,
     drop_until_ms: Option<u64>,
+    queued_audio_samples: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -501,12 +530,15 @@ pub fn play(config: &Config, file_path: &str) -> Result<(), Box<dyn std::error::
             volume_percent: 100,
             generation: 0,
             drop_until_ms: None,
+            queued_audio_samples: 0,
         };
         let mut output_buffer = output_buffer_for(display_size);
         let mut sws_ctx: *mut SwsContext = std::ptr::null_mut();
         let mut playback_error: Option<String> = None;
+        let mut decode_generation = playback.generation;
 
         'outer: loop {
+            let mut drain: Option<PlaybackDrain> = None;
             while running.load(Ordering::SeqCst) {
                 match handle_pending_commands(
                     &command_receiver,
@@ -539,13 +571,52 @@ pub fn play(config: &Config, file_path: &str) -> Result<(), Box<dyn std::error::
                     }
                 }
 
-                let ret = av_read_frame(format_ctx, pkt);
-                if ret != 0 {
-                    break;
+                if decode_generation != playback.generation {
+                    // A seek during EOF draining resumes demuxing. Do not carry resampler
+                    // delay or queued-sample accounting from the retired playback generation.
+                    drain = None;
+                    decode_generation = playback.generation;
+                    if !swr_ctx.is_null() {
+                        swr_free(&mut swr_ctx);
+                    }
+                    while running.load(Ordering::SeqCst) && reset_audio.load(Ordering::SeqCst) {
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    audio_clock.store(0, Ordering::SeqCst);
+                }
+                if let Some(pending) = drain.as_mut() {
+                    match pending.is_complete(
+                        audio_clock.load(Ordering::SeqCst),
+                        playback.queued_audio_samples,
+                    ) {
+                        Ok(true) => break,
+                        Ok(false) => {}
+                        Err(_) => {
+                            playback_error =
+                                Some(String::from("Renderer stopped before playback finished"));
+                            break 'outer;
+                        }
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
                 }
 
-                if (*pkt).stream_index == video_stream_index {
-                    let ret = avcodec_send_packet(codec_ctx, pkt);
+                let ret = av_read_frame(format_ctx, pkt);
+                let end_of_input = ret == AVERROR_EOF;
+                if ret < 0 && !end_of_input {
+                    playback_error =
+                        Some(format!("Could not read media packet: FFmpeg error {ret}"));
+                    break 'outer;
+                }
+                // NULL enters FFmpeg's drain mode and releases delayed B-frames and audio.
+                let packet = if end_of_input {
+                    std::ptr::null()
+                } else {
+                    pkt.cast_const()
+                };
+
+                if end_of_input || (*pkt).stream_index == video_stream_index {
+                    let ret = avcodec_send_packet(codec_ctx, packet);
                     if ret == 0 {
                         while avcodec_receive_frame(codec_ctx, frame) == 0 {
                             if !running.load(Ordering::SeqCst) {
@@ -645,8 +716,9 @@ pub fn play(config: &Config, file_path: &str) -> Result<(), Box<dyn std::error::
                             }
                         }
                     }
-                } else if (*pkt).stream_index == audio_stream_index && has_audio {
-                    let ret = avcodec_send_packet(audio_codec_ctx, pkt);
+                }
+                if has_audio && (end_of_input || (*pkt).stream_index == audio_stream_index) {
+                    let ret = avcodec_send_packet(audio_codec_ctx, packet);
                     if ret == 0 {
                         while avcodec_receive_frame(audio_codec_ctx, audio_frame) == 0 {
                             if !running.load(Ordering::SeqCst) {
@@ -745,24 +817,63 @@ pub fn play(config: &Config, file_path: &str) -> Result<(), Box<dyn std::error::
                                 if let Some(ref mut prod) = audio_producer {
                                     let sample_count =
                                         (converted * target_channels as c_int) as usize;
-                                    for sample in resampled_buffer.iter().take(sample_count) {
-                                        while running.load(Ordering::SeqCst) {
-                                            match prod.try_push(*sample) {
-                                                Ok(_) => break,
-                                                Err(_) => {
-                                                    thread::sleep(Duration::from_micros(500));
-                                                }
-                                            }
-                                        }
-                                    }
+                                    playback.queued_audio_samples += queue_audio_samples(
+                                        prod,
+                                        &resampled_buffer[..sample_count],
+                                        running,
+                                    );
                                 }
                             }
                         }
                     }
                 }
-                av_packet_unref(pkt);
+                if !end_of_input {
+                    av_packet_unref(pkt);
+                }
                 if playback_error.is_some() {
                     break;
+                }
+                if end_of_input && running.load(Ordering::SeqCst) {
+                    // The resampler can retain a partial output block after the decoder ends.
+                    if let Some(prod) = audio_producer
+                        .as_mut()
+                        .filter(|_| has_audio && !swr_ctx.is_null())
+                    {
+                        let mut samples = vec![0.0_f32; 1024 * usize::from(target_channels)];
+                        loop {
+                            let mut output = samples.as_mut_ptr().cast::<u8>();
+                            let converted =
+                                swr_convert(swr_ctx, &mut output, 1024, std::ptr::null(), 0);
+                            if converted < 0 {
+                                playback_error = Some(format!(
+                                    "Could not drain audio resampler: FFmpeg error {converted}"
+                                ));
+                                break 'outer;
+                            }
+                            if converted == 0 || !running.load(Ordering::SeqCst) {
+                                break;
+                            }
+                            let count = converted as usize * usize::from(target_channels);
+                            playback.queued_audio_samples +=
+                                queue_audio_samples(prod, &samples[..count], running);
+                        }
+                    }
+                    let (complete, receiver) = mpsc::channel();
+                    if render_sender
+                        .send(RenderMessage::Drain {
+                            generation: playback.generation,
+                            complete,
+                        })
+                        .is_err()
+                    {
+                        playback_error =
+                            Some(String::from("Renderer stopped before playback finished"));
+                        break 'outer;
+                    }
+                    drain = Some(PlaybackDrain {
+                        complete: receiver,
+                        rendered: false,
+                    });
                 }
             }
 
@@ -825,6 +936,27 @@ pub fn play(config: &Config, file_path: &str) -> Result<(), Box<dyn std::error::
     }
 
     Ok(())
+}
+
+fn queue_audio_samples(
+    producer: &mut ringbuf::HeapProd<f32>,
+    samples: &[f32],
+    running: &AtomicBool,
+) -> u64 {
+    let mut queued = 0;
+    for sample in samples {
+        while running.load(Ordering::SeqCst) {
+            if producer.try_push(*sample).is_ok() {
+                queued += 1;
+                break;
+            }
+            thread::sleep(Duration::from_micros(500));
+        }
+        if !running.load(Ordering::SeqCst) {
+            break;
+        }
+    }
+    queued
 }
 
 fn spawn_input_thread(
@@ -1052,6 +1184,15 @@ fn spawn_render_thread(
                 }
                 Ok(RenderMessage::RedrawStatus) => {
                     let _ = draw_status_row(&mut stdout, layout, &status);
+                }
+                Ok(RenderMessage::Drain {
+                    generation,
+                    complete,
+                }) => {
+                    // FIFO ordering puts this after every decoded frame. Keep the last
+                    // image visible for its frame interval before acknowledging completion.
+                    sleep_interruptibly(frame_delay, running, &playback_generation, generation);
+                    let _ = complete.send(());
                 }
                 Ok(RenderMessage::Quit) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -1330,6 +1471,7 @@ unsafe fn seek_playback_to_ms(
     }
 
     playback.generation = playback.generation.saturating_add(1);
+    playback.queued_audio_samples = 0;
     playback.drop_until_ms = Some(target_ms);
     playback_generation.store(playback.generation, Ordering::SeqCst);
     position_ms.store(target_ms, Ordering::SeqCst);
@@ -1414,6 +1556,36 @@ fn update_status(status: &SharedStatus, update: impl FnOnce(&mut StatusState)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn eof_waits_for_both_rendered_video_and_consumed_audio() {
+        let (sender, complete) = mpsc::channel();
+        let mut drain = PlaybackDrain {
+            complete,
+            rendered: false,
+        };
+        assert_eq!(drain.is_complete(96_000, 96_000), Ok(false));
+        sender.send(()).unwrap();
+        drop(sender);
+        assert_eq!(drain.is_complete(48_000, 96_000), Ok(false));
+        assert_eq!(drain.is_complete(96_000, 96_000), Ok(true));
+        // Completion remains recorded after the render thread drops its acknowledgment sender.
+        assert_eq!(drain.is_complete(96_000, 96_000), Ok(true));
+    }
+
+    #[test]
+    fn renderer_failure_does_not_report_successful_eof() {
+        let (sender, complete) = mpsc::channel();
+        let mut drain = PlaybackDrain {
+            complete,
+            rendered: false,
+        };
+        drop(sender);
+        assert_eq!(
+            drain.is_complete(0, 0),
+            Err(mpsc::TryRecvError::Disconnected)
+        );
+    }
 
     fn layout_from_cells(cols: u16, rows: u16) -> VideoTerminalLayout {
         VideoTerminalLayout::from_geometry(TerminalGeometry::from_cells(cols, rows))

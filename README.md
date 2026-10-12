@@ -89,6 +89,22 @@ file path -> image/GIF decoder or FFmpeg -> RGBA frames -> Kitty graphics chunks
 
 `kitim` keeps the rendering path direct: decode into RGBA, resize to terminal cell geometry, chunk through the Kitty protocol, and use audio timing as the playback clock when a video has sound.
 
+At end of input, kitim drains both FFmpeg decoders and the audio resampler, then
+waits for queued video and audio to finish before exiting or looping. Seeking and
+quitting remain available while that final media is playing.
+
+The opt-in playback regression uses Python 3, `ffmpeg`, and `ffprobe` to generate
+short B-frame/AAC clips and check actual terminal output, final frames, looping,
+and input near EOF:
+
+```sh
+python tests/video_playback.py --binary target/release/kitim
+```
+
+On Windows, use `target/release/kitim.exe` and add `--conpty PATH/conpty.dll`,
+pointing at Vivido's bundled runtime with its matching `OpenConsole.exe` beside it.
+Add `--media PATH` to check another video without modifying it.
+
 ## Notes
 
 For iTerm2, set:

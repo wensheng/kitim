@@ -8,7 +8,9 @@ use std::sync::{
     Once, OnceLock,
 };
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 const KITTY_CHUNK_SIZE: usize = 4096;
 const TMUX_PASSTHROUGH_PREFIX: &[u8] = b"\x1bPtmux;";
@@ -529,6 +531,7 @@ fn query_vvmux_graphics() -> bool {
     false
 }
 
+#[cfg(any(unix, test))]
 fn kitty_query_result(response: &[u8], image_id: u32) -> Option<bool> {
     let prefix = format!("\x1b_Gi={image_id};");
     let start = response

@@ -25,6 +25,21 @@
 
 (Audio and video playback require `ffmpeg` installed, `brew install ffmpeg` on MacOS)
 
+Windows MSVC builds require a **shared FFmpeg development SDK**, including `include`,
+`lib`, and `bin` directories. An `ffmpeg.exe` installation alone is insufficient.
+Set `FFMPEG_DIR` to the SDK root, or use vcpkg:
+
+```powershell
+vcpkg install ffmpeg:x64-windows
+$env:VCPKG_ROOT = "C:/path/to/vcpkg"
+cargo build --release
+```
+
+The build uses the target architecture's Windows triplet by default;
+`VCPKG_TARGET_TRIPLET` or `VCPKG_DEFAULT_TRIPLET` can override it. It detects the
+FFmpeg ABI from the SDK headers and copies runtime DLLs beside the executable.
+When distributing the executable, include those DLLs.
+
 ---
 
 ## Why

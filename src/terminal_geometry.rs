@@ -1,7 +1,9 @@
+#[cfg(unix)]
 use std::time::Duration;
 
 const DEFAULT_CELL_WIDTH_PX: u32 = 10;
 const DEFAULT_CELL_HEIGHT_PX: u32 = 20;
+#[cfg(unix)]
 const CSI_CELL_SIZE_TIMEOUT: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -211,6 +213,7 @@ fn query_cell_size_with_csi() -> Option<(u32, u32)> {
     None
 }
 
+#[cfg(any(unix, test))]
 fn parse_csi_16t_response(data: &[u8]) -> Option<(u32, u32)> {
     const PREFIX: &str = "\x1b[6;";
 

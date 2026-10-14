@@ -29,6 +29,10 @@ pub struct Config {
     pub preview: Option<Vec<String>>,
 
     /// Cell size in pixels for --preview, e.g. 9x18 [default: from the tty]
-    #[arg(long, value_name = "WxH", requires = "preview")]
+    #[arg(long, value_name = "WxH")]
     pub cell_size: Option<String>,
+
+    /// Play a video's sound in --preview mode, which is otherwise muted
+    #[arg(long)]
+    pub sound: bool,
 }

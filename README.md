@@ -94,9 +94,12 @@ Each frame is a cursor move that centers the image, then one image with a
 fresh `i=` id, `C=1` (the cursor stays put) and `q=2` (no replies). Images
 keep their size, shrinking to fit; the terminal scales each to its cells, so
 animation frames are sent at reduced resolution. Still images print one frame
-and exit. GIFs and videos loop, muted, until the host kills kitim or closes
-the pipe. If the file can't be shown, kitim prints a one-line reason instead
-and exits with status 1.
+and exit. GIFs and videos loop until the host kills kitim or closes the
+pipe. Videos are muted unless `--sound` is given: then their audio plays on
+the default output device and paces the picture. The first frame shows
+before the device opens, which can take a few hundred milliseconds. If the
+file can't be shown, kitim prints a one-line reason instead and exits with
+status 1.
 
 The cell size in pixels comes from the tty driver, else defaults to 10x20;
 `--cell-size WxH` overrides it.

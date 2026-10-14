@@ -144,6 +144,45 @@ fn preview_video_plays_rgb_frames_when_ffmpeg_is_available() {
 }
 
 #[test]
+fn preview_with_sound_plays_video_with_an_audio_track() {
+    let dir = scratch("sound");
+    let file = dir.join("hush.mp4");
+    // Silent audio: the test may play through a real device.
+    let made = Command::new("ffmpeg")
+        .args(["-loglevel", "error", "-f", "lavfi", "-i"])
+        .arg("testsrc=size=64x48:rate=10")
+        .args(["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"])
+        .args(["-t", "1", "-c:v", "mpeg4", "-c:a", "aac", "-shortest"])
+        .arg(&file)
+        .status();
+    if !made.is_ok_and(|s| s.success()) {
+        eprintln!("skipped: the ffmpeg CLI is needed to make a test video");
+        return;
+    }
+    // Without an audio device the video plays silently; either way it plays.
+    let mut command = preview(&file, "20", "10");
+    command.arg("--sound");
+    let frames = first_frames(command, 3);
+    assert_eq!(frames.len(), 3, "{frames:?}");
+    assert!(frames[0].contains(",f=24,s=64,v=48,"), "{}", frames[0]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn preview_options_need_preview_mode() {
+    for option in [&["--sound"][..], &["--cell-size", "9x18"]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_kitim"))
+            .args(option)
+            .arg("a.mp4")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{option:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("only work with --preview"), "{stderr}");
+    }
+}
+
+#[test]
 fn preview_failures_print_one_line_and_exit_1() {
     let dir = scratch("fail");
     let file = dir.join("notes.dat");

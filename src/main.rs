@@ -8,14 +8,28 @@ mod preview;
 mod terminal_geometry;
 mod video_player;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use config::Config;
 use std::path::Path;
 
 fn main() {
     let config = Config::parse();
+    // Checked here, not with clap's `requires`: clap skips a requirement on
+    // an argument that conflicts with given ones, as --preview does with FILES.
+    if config.preview.is_none() && (config.sound || config.cell_size.is_some()) {
+        Config::command()
+            .error(
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "--sound and --cell-size only work with --preview",
+            )
+            .exit();
+    }
     if let Some(args) = &config.preview {
-        std::process::exit(preview::run(args, config.cell_size.as_deref()));
+        std::process::exit(preview::run(
+            args,
+            config.cell_size.as_deref(),
+            config.sound,
+        ));
     }
 
     for file in &config.files {

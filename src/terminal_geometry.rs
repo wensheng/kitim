@@ -66,6 +66,21 @@ impl TerminalGeometry {
     }
 }
 
+/// Cell size in pixels from the tty driver alone, if it reports one.
+///
+/// Unlike [`TerminalGeometry::current`], this never queries the terminal, so
+/// it is safe while another program owns the terminal's input.
+pub(crate) fn passive_cell_size() -> Option<(u32, u32)> {
+    let size = crossterm::terminal::window_size().ok()?;
+    RawWinsize {
+        cols: size.columns,
+        rows: size.rows,
+        xpixel: u32::from(size.width),
+        ypixel: u32::from(size.height),
+    }
+    .cell_size()
+}
+
 pub(crate) fn cells_for_pixels(pixels: u32, cell_px: u32) -> u32 {
     let cell_px = cell_px.max(1);
     pixels.max(1).saturating_add(cell_px - 1) / cell_px

@@ -406,7 +406,7 @@ pub fn flush_robust<W: Write>(mut writer: W) -> io::Result<()> {
     }
 }
 
-fn next_image_id() -> u32 {
+pub(crate) fn next_image_id() -> u32 {
     let sequence = NEXT_IMAGE_ID.get_or_init(|| {
         let mut seed = [0_u8; 4];
         if getrandom::fill(&mut seed).is_err() {
@@ -851,9 +851,120 @@ fn write_rgba_frame_to_with_mode<W: Write>(
     Ok(())
 }
 
+/// Pixel layout of a [`Placed`] frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PixelFormat {
+    /// 3 bytes per pixel (kitty `f=24`).
+    Rgb,
+    /// 4 bytes per pixel, with alpha (kitty `f=32`).
+    Rgba,
+}
+
+/// One frame for an area whose position the host program controls.
+#[derive(Debug, Clone, Copy)]
+pub struct Placed<'a> {
+    /// `width_px * height_px` pixels in `format`, row by row.
+    pub pixels: &'a [u8],
+    pub format: PixelFormat,
+    pub width_px: u32,
+    pub height_px: u32,
+    /// Cells the terminal scales the image to cover.
+    pub cols: u32,
+    pub rows: u32,
+    /// Cells right of the host's cursor where the image starts.
+    pub left: u32,
+    /// Image id, so the host can delete the frame later. Must be nonzero.
+    pub id: u32,
+}
+
+/// Writes `frame` at the cursor without moving it or soliciting replies.
+///
+/// Emits a cursor-forward to the image's left edge, then the image as
+/// chunked transmit-and-display commands with `C=1` (the cursor stays put,
+/// so the screen can't scroll) and `q=2` (the terminal sends no reply into
+/// the host's input). The whole frame goes out in one `write_all`.
+///
+/// # Errors
+///
+/// Any error writing to `out`.
+pub fn write_placed_frame<W: Write>(out: &mut W, frame: &Placed<'_>) -> io::Result<()> {
+    let data = BASE64_STANDARD.encode(frame.pixels);
+    let mut buf = Vec::with_capacity(data.len() + data.len() / KITTY_CHUNK_SIZE * 24 + 128);
+    if frame.left > 0 {
+        write!(buf, "\x1b[{}C", frame.left)?;
+    }
+    let format = match frame.format {
+        PixelFormat::Rgb => 24,
+        PixelFormat::Rgba => 32,
+    };
+    let mut chunks = data.as_bytes().chunks(KITTY_CHUNK_SIZE).peekable();
+    let mut first = true;
+    while let Some(chunk) = chunks.next() {
+        let more = u8::from(chunks.peek().is_some());
+        if first {
+            write!(
+                buf,
+                "\x1b_Ga=T,i={},f={format},s={},v={},c={},r={},C=1,q=2,m={more};",
+                frame.id, frame.width_px, frame.height_px, frame.cols, frame.rows
+            )?;
+            first = false;
+        } else {
+            write!(buf, "\x1b_Gq=2,m={more};")?;
+        }
+        buf.extend_from_slice(chunk);
+        buf.extend_from_slice(b"\x1b\\");
+    }
+    out.write_all(&buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn placed_frame_moves_right_then_sends_quiet_cursor_fixed_chunks() {
+        let pixels = vec![7_u8; 3 * 2000]; // 8000 base64 bytes: two chunks
+        let frame = Placed {
+            pixels: &pixels,
+            format: PixelFormat::Rgb,
+            width_px: 50,
+            height_px: 40,
+            cols: 5,
+            rows: 2,
+            left: 3,
+            id: 42,
+        };
+        let mut out = Vec::new();
+        write_placed_frame(&mut out, &frame).unwrap();
+        let out = String::from_utf8(out).unwrap();
+
+        let first = "\x1b[3C\x1b_Ga=T,i=42,f=24,s=50,v=40,c=5,r=2,C=1,q=2,m=1;";
+        assert!(out.starts_with(first), "{out:.80}");
+        let second = out.find("\x1b_Gq=2,m=0;").expect("final chunk");
+        assert_eq!(second, first.len() + KITTY_CHUNK_SIZE + 2);
+        assert!(out.ends_with("\x1b\\"));
+        assert_eq!(out.matches("\x1b_G").count(), 2);
+    }
+
+    #[test]
+    fn placed_frame_at_cursor_has_no_move_and_single_chunk() {
+        let frame = Placed {
+            pixels: &[0, 0, 0, 255],
+            format: PixelFormat::Rgba,
+            width_px: 1,
+            height_px: 1,
+            cols: 1,
+            rows: 1,
+            left: 0,
+            id: 7,
+        };
+        let mut out = Vec::new();
+        write_placed_frame(&mut out, &frame).unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "\x1b_Ga=T,i=7,f=32,s=1,v=1,c=1,r=1,C=1,q=2,m=0;AAAA/w==\x1b\\"
+        );
+    }
 
     #[test]
     fn tmux_wrapper_doubles_escapes_inside_dcs_passthrough() {

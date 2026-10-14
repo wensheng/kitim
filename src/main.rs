@@ -4,6 +4,7 @@ mod ffmpeg;
 mod image_viewer;
 mod kitty;
 mod playback_control;
+mod preview;
 mod terminal_geometry;
 mod video_player;
 
@@ -13,6 +14,9 @@ use std::path::Path;
 
 fn main() {
     let config = Config::parse();
+    if let Some(args) = &config.preview {
+        std::process::exit(preview::run(args, config.cell_size.as_deref()));
+    }
 
     for file in &config.files {
         let path = Path::new(file);

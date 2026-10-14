@@ -77,6 +77,30 @@ kitim --loop --frame-rate 24 animation.gif
 original size by default, and shrinks to fit the terminal with a small margin
 when it would otherwise exceed the available screen area.
 
+### Preview mode
+
+```bash
+kitim --preview photo.jpg 60 30
+```
+
+`--preview FILE COLS ROWS` renders one file into a COLS x ROWS cell area of
+another program's screen, such as a file manager's preview pane. It is how
+[vfm](https://github.com/wensheng/vfm) previews images and videos. kitim then
+writes kitty graphics to stdout and does no other terminal I/O: no raw mode,
+no queries, no input, no audio. The host moves the cursor to the area's
+top-left cell and forwards the output.
+
+Each frame is a cursor move that centers the image, then one image with a
+fresh `i=` id, `C=1` (the cursor stays put) and `q=2` (no replies). Images
+keep their size, shrinking to fit; the terminal scales each to its cells, so
+animation frames are sent at reduced resolution. Still images print one frame
+and exit. GIFs and videos loop, muted, until the host kills kitim or closes
+the pipe. If the file can't be shown, kitim prints a one-line reason instead
+and exits with status 1.
+
+The cell size in pixels comes from the tty driver, else defaults to 10x20;
+`--cell-size WxH` overrides it.
+
 ---
 
 ## How It Works

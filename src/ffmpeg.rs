@@ -2,6 +2,7 @@ use std::ffi::{c_char, c_double, c_int, c_uint, c_void};
 
 pub const AVMEDIA_TYPE_VIDEO: c_int = 0;
 pub const AVMEDIA_TYPE_AUDIO: c_int = 1;
+pub const AV_PIX_FMT_RGB24: c_int = 2;
 pub const AV_PIX_FMT_RGBA: c_int = 26;
 pub const SWS_BILINEAR: c_int = 2;
 pub const AV_SAMPLE_FMT_FLT: c_int = 3;

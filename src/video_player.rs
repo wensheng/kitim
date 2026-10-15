@@ -182,10 +182,10 @@ struct KeyOutcome {
     redraw_status: bool,
 }
 
-struct VideoTerminalSession;
+pub(crate) struct TerminalSession;
 
-impl VideoTerminalSession {
-    fn enter() -> io::Result<Self> {
+impl TerminalSession {
+    pub(crate) fn enter() -> io::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         if let Err(err) = execute!(
@@ -203,7 +203,7 @@ impl VideoTerminalSession {
     }
 }
 
-impl Drop for VideoTerminalSession {
+impl Drop for TerminalSession {
     fn drop(&mut self) {
         let mut stdout = io::stdout();
         let _ = execute!(
@@ -471,7 +471,7 @@ pub fn play(config: &Config, file_path: &str) -> Result<(), Box<dyn std::error::
             .map(|f| Duration::from_secs_f32(1.0 / f))
             .unwrap_or_else(|| Duration::from_secs_f32(delay_secs));
 
-        let _terminal_session = match VideoTerminalSession::enter() {
+        let _terminal_session = match TerminalSession::enter() {
             Ok(session) => session,
             Err(err) => {
                 if !audio_codec_ctx.is_null() {

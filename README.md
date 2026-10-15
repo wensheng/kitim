@@ -71,11 +71,17 @@ kitim screenshot.png
 kitim song.mp3
 kitim -z 1.5 clip.webm
 kitim --loop --frame-rate 24 animation.gif
+kitim --fullscreen photo.jpg
 ```
 
 `-z`/`--zoom` is a multiplier on the original media size. Media displays at
 original size by default, and shrinks to fit the terminal with a small margin
 when it would otherwise exceed the available screen area.
+
+`--fullscreen` takes over the screen for images: the picture is scaled
+(upscaled too) to the largest size that fits, centered, and kitim waits for
+any key press before returning — handy from file managers. GIFs loop until a
+key. Videos and audio keep their usual full-screen player.
 
 ### Preview mode
 

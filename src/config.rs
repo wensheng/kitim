@@ -35,4 +35,8 @@ pub struct Config {
     /// Play a video's sound in --preview mode, which is otherwise muted
     #[arg(long)]
     pub sound: bool,
+
+    /// Show images scaled to fill the screen until any key is pressed
+    #[arg(long, conflicts_with = "preview")]
+    pub fullscreen: bool,
 }

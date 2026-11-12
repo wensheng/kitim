@@ -1430,7 +1430,6 @@ unsafe fn handle_pending_commands(
                 volume_percent_atomic.store(next, Ordering::SeqCst);
                 update_status(status, |state| {
                     state.volume_percent = next;
-                    state.message = format!("Volume {next}%");
                 });
                 let _ = render_sender.try_send(RenderMessage::RedrawStatus);
             }

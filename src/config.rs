@@ -22,4 +22,12 @@ pub struct Config {
     /// Loop video, GIF, or audio playback continuously
     #[arg(short = 'l', long = "loop")]
     pub loop_video: bool,
+
+    /// Initial playback volume percentage
+    #[arg(short = 'v', long = "volume", default_value_t = 100)]
+    pub volume: u32,
+
+    /// Disable all playback controls & control tips
+    #[arg(short = 'd', long = "disable-controls")]
+    pub disable_controls: bool,
 }

@@ -154,6 +154,7 @@ struct StatusState {
     volume_percent: u32,
     message: String,
     input_buffer: Option<String>,
+    controls_disabled: bool,
 }
 
 impl Default for StatusState {
@@ -164,6 +165,7 @@ impl Default for StatusState {
             volume_percent: 100,
             message: String::new(),
             input_buffer: None,
+            controls_disabled: false,
         }
     }
 }
@@ -485,6 +487,7 @@ pub fn play(config: &Config, file_path: &str) -> Result<(), Box<dyn std::error::
 
         let status = Arc::new(Mutex::new(StatusState {
             duration_ms,
+            controls_disabled: config.disable_controls,
             ..StatusState::default()
         }));
         let position_ms = Arc::new(AtomicU64::new(0));
@@ -513,6 +516,7 @@ pub fn play(config: &Config, file_path: &str) -> Result<(), Box<dyn std::error::
             command_sender,
             render_sender.clone(),
             status.clone(),
+            config.disable_controls,
         );
 
         let pkt = av_packet_alloc();
@@ -964,6 +968,7 @@ fn spawn_input_thread(
     command_sender: mpsc::Sender<PlayerCommand>,
     render_sender: SyncSender<RenderMessage>,
     status: SharedStatus,
+    disable_controls: bool,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut input_state = ControlInputState::default();
@@ -974,6 +979,9 @@ fn spawn_input_thread(
                     Ok(Event::Key(key))
                         if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                     {
+                        if disable_controls {
+                            continue;
+                        }
                         let outcome = handle_key(key, &mut input_state);
                         update_status(&status, |state| {
                             state.input_buffer = input_state.goto_buffer.clone();
@@ -1248,6 +1256,11 @@ fn status_text(status: &StatusState) -> String {
         .duration_ms
         .map(format_time_ms)
         .unwrap_or_else(|| String::from("--:--"));
+        let shortcuts = if status.controls_disabled {
+        ""
+    } else {
+        STATUS_SHORTCUTS
+    };
     let middle = if let Some(input) = &status.input_buffer {
         if status.message.is_empty() {
             format!("Goto> {input}  Enter seek Esc cancel")
@@ -1257,13 +1270,31 @@ fn status_text(status: &StatusState) -> String {
     } else {
         status.message.clone()
     };
-    if middle.is_empty() {
+if middle.is_empty() {
+    if shortcuts.is_empty() {
+        format!(
+            "{} / {} | Vol {}%",
+            format_time_ms(status.current_ms),
+            duration,
+            status.volume_percent,
+        )
+    } else {
         format!(
             "{} / {} | Vol {}% | {}",
             format_time_ms(status.current_ms),
             duration,
             status.volume_percent,
-            STATUS_SHORTCUTS
+            shortcuts
+        )
+    }
+} else {
+    if shortcuts.is_empty() {
+        format!(
+            "{} / {} | Vol {}% | {}",
+            format_time_ms(status.current_ms),
+            duration,
+            status.volume_percent,
+            middle
         )
     } else {
         format!(
@@ -1272,9 +1303,10 @@ fn status_text(status: &StatusState) -> String {
             duration,
             status.volume_percent,
             middle,
-            STATUS_SHORTCUTS
+            shortcuts
         )
     }
+}
 }
 
 fn truncate_to_cols(text: &str, cols: u16) -> String {

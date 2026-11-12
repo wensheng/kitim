@@ -389,7 +389,8 @@ pub fn play(config: &Config, file_path: &str) -> Result<(), Box<dyn std::error::
         let mut target_sample_rate = 48000;
         let audio_clock = Arc::new(AtomicU64::new(0));
         let reset_audio = Arc::new(AtomicBool::new(false));
-        let volume_percent_atomic = Arc::new(AtomicU32::new(100));
+        let initial_volume = config.volume.clamp(0, 200);
+        let volume_percent_atomic = Arc::new(AtomicU32::new(initial_volume));
 
         let mut swr_ctx: *mut SwrContext = std::ptr::null_mut();
         let mut audio_producer = None;
@@ -488,6 +489,7 @@ pub fn play(config: &Config, file_path: &str) -> Result<(), Box<dyn std::error::
         let status = Arc::new(Mutex::new(StatusState {
             duration_ms,
             controls_disabled: config.disable_controls,
+            volume_percent: initial_volume,
             ..StatusState::default()
         }));
         let position_ms = Arc::new(AtomicU64::new(0));
@@ -531,7 +533,7 @@ pub fn play(config: &Config, file_path: &str) -> Result<(), Box<dyn std::error::
             terminal_layout,
             display_size,
             duration_ms,
-            volume_percent: 100,
+            volume_percent: initial_volume,
             generation: 0,
             drop_until_ms: None,
             queued_audio_samples: 0,
